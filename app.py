@@ -1,164 +1,267 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import datetime
 from data_service import get_company_data
-from dcf_engine import run_full_model
+from dcf_engine import run_full_model, calc_wacc
 
 # Page config
 st.set_page_config(page_title="DCF Valuation Model", page_icon="📈", layout="wide")
 
-# Custom CSS for Dark Premium Feel
+# --- PREMIUM DARK CSS ---
 st.markdown("""
     <style>
-    .main { background-color: #0f172a; color: #f8fafc; }
-    .stMetric { background-color: rgba(30, 41, 59, 0.7); padding: 15px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1); }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { 
-        background-color: rgba(30, 41, 59, 1); 
-        border-radius: 4px 4px 0 0; 
-        padding: 10px 20px;
-        color: #94a3b8;
+    /* Base Background & Styling */
+    .main { background-color: #0a0e1a; color: #f1f5f9; font-family: 'Inter', sans-serif; }
+    [data-testid="stSidebar"] { background-color: #111827; border-right: 1px solid rgba(255, 255, 255, 0.08); }
+    
+    /* Headings */
+    h1, h2, h3 { color: #f1f5f9; font-weight: 800; letter-spacing: -0.02em; }
+    .hero-title {
+        font-size: 3.2rem;
+        background: linear-gradient(135deg, #f1f5f9, #6366f1, #a78bfa);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     }
-    .stTabs [aria-selected="true"] { background-color: #3b82f6 !important; color: white !important; }
-    .data-flag { padding: 4px 10px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; margin-bottom: 10px; display: inline-block; }
-    .flag-verified { background: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.2); }
-    .flag-live { background: rgba(245, 158, 11, 0.1); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.2); }
+    
+    /* Cards & Containers */
+    .premium-card {
+        background: rgba(17, 24, 39, 0.8);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 16px;
+        padding: 24px;
+        backdrop-filter: blur(12px);
+        margin-bottom: 24px;
+    }
+    
+    /* KPI Cards */
+    .kpi-card {
+        background: rgba(17, 24, 39, 0.8);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 20px;
+        text-align: left;
+    }
+    .kpi-label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; font-weight: 700; margin-bottom: 4px; }
+    .kpi-value { font-size: 1.8rem; font-weight: 800; color: #f1f5f9; }
+    
+    /* Buttons */
+    .stButton>button {
+        background: linear-gradient(135deg, #6366f1, #8b5cf6);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 10px 24px;
+        font-weight: 700;
+        transition: all 0.2s;
+        width: 100%;
+    }
+    .stButton>button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4);
+    }
+    
+    /* Inputs & Sliders */
+    .stSlider [data-baseweb="slider"] { color: #6366f1; }
+    .stTextInput input { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08); color: white; }
+    
+    /* Badges */
+    .badge { padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; font-weight: 700; display: inline-block; }
+    .badge-green { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+    .badge-red { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- SIDEBAR: Ticker & High-Level Assumptions ---
-with st.sidebar:
-    st.title("📈 Model Inputs")
-    ticker_input = st.text_input("Enter Ticker Symbol", value="NVDA").upper()
-    
-    st.divider()
-    st.subheader("Forecast Assumptions")
-    rev_growth = st.slider("Revenue Growth (%)", 0, 100, 25) / 100
-    fcf_margin = st.slider("FCF Margin (%)", 5, 60, 35) / 100
-    
-    st.subheader("WACC (Cost of Capital)")
-    risk_free = st.number_input("Risk-Free Rate (%)", 0.0, 10.0, 4.2) / 100
-    mkt_premium = st.number_input("Equity Risk Premium (%)", 0.0, 10.0, 5.5) / 100
-    beta_override = st.number_input("Beta (Adjusted)", 0.5, 3.0, 1.70, step=0.05)
-    
-    st.subheader("Terminal Value")
-    t_growth = st.slider("Terminal Growth (%)", 0.0, 5.0, 2.0) / 100
-
-# --- DATA LOADING ---
-if ticker_input:
-    company = get_company_data(ticker_input)
-    
-    # Header Area
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.title(f"{company['name']} ({company['ticker']})")
-        for flag in company.get('flags', []):
-            flag_class = "flag-verified" if "Verified" in flag else "flag-live"
-            st.markdown(f'<div class="data-flag {flag_class}">{"✓" if "Verified" in flag else "⚑"} {flag}</div>', unsafe_allow_html=True)
-    
-    with col2:
-        st.metric("Current Price", f"${company['price']:,.2f}", delta=None)
-
-    # Prepare Assumptions Dict
-    assumptions = {
-        'revenue_growth': rev_growth,
-        'fcf_margin': fcf_margin,
-        'risk_free': risk_free,
-        'mkt_premium': mkt_premium,
-        'beta': beta_override,
-        'terminal_growth': t_growth,
+# --- SESSION STATE ---
+if 'company' not in st.session_state:
+    st.session_state.company = None
+if 'ticker' not in st.session_state:
+    st.session_state.ticker = ""
+if 'assumptions' not in st.session_state:
+    st.session_state.assumptions = {
+        'revenue_growth': 0.15,
+        'fcf_margin': 0.25,
+        'tax_rate': 0.21,
+        'wacc_mode': 'direct',
+        'wacc_direct': 0.10,
+        'risk_free': 0.042,
+        'mkt_premium': 0.055,
+        'beta': 1.0,
         'terminal_method': 'perpetuity',
+        'terminal_growth': 0.02,
+        'exit_ebitda_multiple': 12.0,
         'years_forecast': 5,
-        'equity_weight': 1.0, # Simple 100% equity for demo
+        'equity_weight': 1.0,
         'debt_weight': 0.0,
-        'net_debt_override': company['net_debt'],
-        'shares_out_override': company['shares_out']
+        'net_debt_override': None,
+        'shares_out_override': None
     }
 
-    # Run Calculation
-    results = run_full_model(company, assumptions)
-    val = results['valuation']
-    forecast = results['forecast']
+# --- SIDEBAR NAVIGATION ---
+with st.sidebar:
+    st.title("📈 DCF Valuation")
+    page = st.radio("Navigation", ["Home", "Inputs", "Outputs", "Sensitivity", "Scenarios", "About"], label_visibility="collapsed")
+    
+    st.divider()
+    if st.session_state.company:
+        st.subheader("Active Company")
+        st.markdown(f"**{st.session_state.company['name']}**")
+        st.markdown(f"Ticker: `{st.session_state.company['ticker']}`")
+        if st.button("Reset Session"):
+            st.session_state.company = None
+            st.rerun()
 
-    # --- TABS ---
-    tab_summary, tab_forecast, tab_sensitivity, tab_about = st.tabs(["📊 Summary", "📅 Forecast Analysis", "🗺 Sensitivity", "📖 About"])
-
-    with tab_summary:
-        st.subheader("Valuation Summary")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Intrinsic Value", f"${val['per_share_value']:,.2f}")
-        c2.metric("Market Price", f"${company['price']:,.2f}")
+# --- HELPER: KPICard ---
+def kpi_card(label, value, delta=None, delta_color="normal"):
+    delta_html = ""
+    if delta:
+        color = "#10b981" if delta_color == "inverse" and "-" not in str(delta) else "#ef4444" 
+        if delta_color == "normal": color = "#10b981" if "-" not in str(delta) else "#ef4444"
+        delta_html = f'<div style="color: {color}; font-size: 0.85rem; font-weight: 600; margin-top: 4px;">{delta}</div>'
         
-        upside = val['upside_pct'] * 100
-        c3.metric("Upside/Downside", f"{upside:,.1f}%", delta=f"{upside:,.1f}%", delta_color="normal")
-        c4.metric("WACC", f"{val['wacc']*100:,.1f}%")
+    st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-label">{label}</div>
+            <div class="kpi-value">{value}</div>
+            {delta_html}
+        </div>
+    """, unsafe_allow_html=True)
 
+# --- PAGE: HOME ---
+if page == "Home":
+    st.markdown('<h1 class="hero-title">DCF Valuation</h1>', unsafe_allow_html=True)
+    st.markdown("Enter any ticker to build a full Discounted Cash Flow model.")
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        ticker_input = st.text_input("Ticker Symbol", value=st.session_state.ticker, placeholder="e.g. NVDA, AAPL").upper()
+        if st.button("Load Financials"):
+            if ticker_input:
+                with st.spinner("Fetching data..."):
+                    st.session_state.company = get_company_data(ticker_input)
+                    st.session_state.ticker = ticker_input
+                    # Set defaults
+                    st.session_state.assumptions['beta'] = st.session_state.company['beta']
+                    st.rerun()
+
+    if st.session_state.company:
+        comp = st.session_state.company
+        st.markdown('<div class="premium-card">', unsafe_allow_html=True)
+        st.subheader(f"{comp['name']} ({comp['ticker']})")
+        
+        c1, c2, c3 = st.columns(3)
+        with c1: st.metric("Price", f"${comp['price']:,.2f}")
+        with c2: st.metric("Market Cap", f"${comp['market_cap']/1e9:,.1f}B")
+        with c3: st.metric("Beta", f"{comp['beta']:.2f}")
+        
+        if st.button("Go to Model →"):
+            st.info("Click 'Inputs' in the sidebar to proceed.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# --- PAGE: INPUTS ---
+elif page == "Inputs":
+    if not st.session_state.company:
+        st.warning("Please load a company on the Home page first.")
+    else:
+        comp = st.session_state.company
+        st.title(f"{comp['name']} - Model Inputs")
+        
+        col1, col2 = st.columns([2, 1.2])
+        
+        with col1:
+            st.markdown('<div class="premium-card">', unsafe_allow_html=True)
+            st.subheader("Forecast Assumptions")
+            st.session_state.assumptions['revenue_growth'] = st.slider("Revenue Growth (%)", -5, 50, int(st.session_state.assumptions['revenue_growth']*100)) / 100
+            st.session_state.assumptions['fcf_margin'] = st.slider("FCF Margin (%)", 0, 60, int(st.session_state.assumptions['fcf_margin']*100)) / 100
+            st.session_state.assumptions['years_forecast'] = st.number_input("Forecast Years", 3, 10, st.session_state.assumptions['years_forecast'])
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.markdown('<div class="premium-card">', unsafe_allow_html=True)
+            st.subheader("WACC Assumptions")
+            wacc_mode = st.radio("Method", ["Direct WACC", "Build WACC"], horizontal=True)
+            st.session_state.assumptions['wacc_mode'] = 'direct' if wacc_mode == "Direct WACC" else 'build'
+            
+            if st.session_state.assumptions['wacc_mode'] == 'direct':
+                st.session_state.assumptions['wacc_direct'] = st.slider("WACC (%)", 5.0, 20.0, st.session_state.assumptions['wacc_direct']*100.0) / 100.0
+            else:
+                c1, c2 = st.columns(2)
+                st.session_state.assumptions['risk_free'] = c1.number_input("Risk-Free Rate (%)", 0.0, 10.0, st.session_state.assumptions['risk_free']*100.0) / 100.0
+                st.session_state.assumptions['beta'] = c2.number_input("Beta", 0.5, 3.0, st.session_state.assumptions['beta'])
+                st.session_state.assumptions['mkt_premium'] = c1.number_input("Equity Risk Premium (%)", 0.0, 10.0, st.session_state.assumptions['mkt_premium']*100.0) / 100.0
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        with col2:
+            st.markdown('<div class="premium-card" style="border-color: #6366f1;">', unsafe_allow_html=True)
+            st.subheader("Live Preview")
+            
+            results = run_full_model(comp, st.session_state.assumptions)
+            val = results['valuation']
+            upside = val['upside_pct'] * 100
+            
+            kpi_card("Intrinsic Value", f"${val['per_share_value']:,.2f}")
+            kpi_card("Upside / Downside", f"{upside:,.1f}%", f"{upside:,.1f}%", delta_color="normal")
+            kpi_card("WACC Used", f"{val['wacc']*100:,.1f}%")
+            
+            if st.button("Run Full Model →"):
+                st.info("Analytics calculated. Click 'Outputs' in sidebar.")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+# --- PAGE: OUTPUTS ---
+elif page == "Outputs":
+    if not st.session_state.company:
+        st.warning("Load a company first.")
+    else:
+        results = run_full_model(st.session_state.company, st.session_state.assumptions)
+        val = results['valuation']
+        forecast = results['forecast']
+        
+        st.title("Valuation Outputs")
+        
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: kpi_card("Intrinsic Value", f"${val['per_share_value']:,.2f}")
+        with c2: kpi_card("Market Price", f"${st.session_state.company['price']:,.2f}")
+        with c3: kpi_card("Upside", f"{val['upside_pct']*100:,.1f}%")
+        with c4: kpi_card("WACC", f"{val['wacc']*100:,.1f}%")
+        
         st.divider()
         
-        # Enterprise Value Bridge
-        st.subheader("Enterprise Value Bridge")
-        bridge_df = pd.DataFrame({
-            "Component": ["PV of Forecast FCF", "PV of Terminal Value", "Enterprise Value", "Net Debt", "Equity Value"],
-            "Value (Billions)": [
-                val['pv_fcf_sum']/1e9, 
-                val['pv_terminal_value']/1e9, 
-                val['enterprise_value']/1e9, 
-                -val['net_debt']/1e9, 
-                val['equity_value']/1e9
-            ]
-        })
-        st.table(bridge_df.style.format({"Value (Billions)": "${:,.1f}B"}))
-
-    with tab_forecast:
-        st.subheader("5-Year Projection (USD Billions)")
+        st.subheader("5-Year FCF Projection (Billions USD)")
         f_df = pd.DataFrame(forecast)
-        f_df['revenue'] = f_df['revenue'] / 1e9
-        f_df['ebitda'] = f_df['ebitda'] / 1e9
-        f_df['fcf'] = f_df['fcf'] / 1e9
-        
-        # Chart
         fig = go.Figure()
-        fig.add_trace(go.Bar(x=f_df['year'], y=f_df['revenue'], name="Revenue", marker_color='#3b82f6'))
-        fig.add_trace(go.Bar(x=f_df['year'], y=f_df['ebitda'], name="EBITDA", marker_color='#10b981'))
-        fig.add_trace(go.Scatter(x=f_df['year'], y=f_df['fcf'], name="Free Cash Flow", line=dict(color='#f59e0b', width=3)))
-        
-        fig.update_layout(
-            barmode='group', 
-            template="plotly_dark", 
-            paper_bgcolor='rgba(0,0,0,0)', 
-            plot_bgcolor='rgba(0,0,0,0)',
-            margin=dict(l=20, r=20, t=40, b=20)
-        )
+        fig.add_trace(go.Bar(x=f_df['year'], y=f_df['revenue']/1e9, name="Revenue", marker_color='#6366f1'))
+        fig.add_trace(go.Bar(x=f_df['year'], y=f_df['fcf']/1e9, name="Free Cash Flow", marker_color='#10b981'))
+        fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig, use_container_width=True)
         
         st.dataframe(f_df.set_index('year')[['revenue', 'ebitda', 'fcf', 'pv_fcf']].style.format("${:,.1f}B"))
 
-    with tab_sensitivity:
-        st.subheader("Sensitivity Matrix: Intrinsic Value vs. WACC & Growth")
+# --- PAGE: SENSITIVITY ---
+elif page == "Sensitivity":
+    if not st.session_state.company:
+        st.warning("Load a company first.")
+    else:
+        st.title("Sensitivity Matrix")
+        st.markdown("Intrinsic Value vs. WACC & Growth")
         
-        # Build Grid
+        # Recalc results for baseline
+        res = run_full_model(st.session_state.company, st.session_state.assumptions)
+        val = res['valuation']
+        
         wacc_range = [val['wacc'] + i*0.01 for i in range(-2, 3)]
-        growth_range = [assumptions['terminal_growth'] + i*0.005 for i in range(-2, 3)]
+        growth_range = [st.session_state.assumptions['terminal_growth'] + i*0.005 for i in range(-2, 3)]
         
         matrix = []
         for g in growth_range:
             row = []
             for w in wacc_range:
-                # Quick temp recalc
-                temp_assumptions = assumptions.copy()
-                temp_assumptions['terminal_growth'] = g
-                # We need a quick way to recalc WACC directly if we wanted, but we'll manually override it for the matrix
-                # For the matrix, 'w' is the final WACC
-                
-                # Manual Calc for Matrix cell
-                n = 5
-                last_fcf = forecast[-1]['fcf']
+                # Simple recalc for matrix
+                n = st.session_state.assumptions['years_forecast']
+                last_fcf = res['forecast'][-1]['fcf']
                 fcf_next = last_fcf * (1 + g)
                 tv = fcf_next / (w - g) if (w - g) > 0 else last_fcf * 50
                 pv_tv = tv / (1 + w)**n
-                ev = val['pv_fcf_sum'] + pv_tv # simplified: assuming PV of fcf sum doesn't change much for demo
-                eq = ev - val['net_debt']
-                ps = eq / val['shares_out']
+                ev = val['pv_fcf_sum'] + pv_tv
+                eq = ev - (st.session_state.assumptions['net_debt_override'] or st.session_state.company['net_debt'])
+                ps = eq / (st.session_state.assumptions['shares_out_override'] or st.session_state.company['shares_out'])
                 row.append(ps)
             matrix.append(row)
             
@@ -167,21 +270,22 @@ if ticker_input:
             index=[f"{g*100:,.1f}%" for g in growth_range],
             columns=[f"{w*100:,.1f}%" for w in wacc_range]
         )
-        
-        st.dataframe(heat_df.style.background_gradient(cmap="RdYlGn", axis=None).format("${:,.1f}"))
-        st.info("💡 Vertical Axis: Terminal Growth Rate | Horizontal Axis: WACC (Cost of Capital)")
+        st.table(heat_df.style.background_gradient(cmap="RdYlGn", axis=None).format("${:,.2f}"))
 
-    with tab_about:
-        st.subheader("Financial Methodology")
-        st.write("""
-        This model utilizes a **3-Stage Discounted Cash Flow (DCF)** method:
-        1. **Stage 1: Explicit Projection**: Projections for Revenue and FCF over a 5-year period.
-        2. **Stage 2: Terminal Value**: Use of the Gordon Growth Method to estimate value beyond year 5.
-        3. **Discounting**: All future cash flows are discounted to the Present Value (PV) using the **WACC** (Weighted Average Cost of Capital).
-        """)
-        
-        st.divider()
-        st.subheader("AI Usage Disclosure")
-        st.info("Collaborative build with Antigravity AI. Logic verified for institutional accuracy.")
-else:
-    st.info("Enter a ticker symbol in the sidebar to begin valuation.")
+# --- PAGE: SCENARIOS ---
+elif page == "Scenarios":
+    st.title("Scenario Analysis")
+    st.info("Feature in progress: Analyze Bull, Bear, and Base cases.")
+
+# --- PAGE: ABOUT ---
+elif page == "About":
+    st.title("Financial Methodology")
+    st.markdown("""
+    This model utilizes a **3-Stage Discounted Cash Flow (DCF)** method:
+    1. **Stage 1: Explicit Projection**: Projections for Revenue and FCF over a 5-year period.
+    2. **Stage 2: Terminal Value**: Use of the Gordon Growth Method to estimate value beyond year 5.
+    3. **Discounting**: All future cash flows are discounted to the Present Value (PV) using the **WACC**.
+    """)
+    st.divider()
+    st.subheader("AI Usage Disclosure")
+    st.info("Collaborative build with Antigravity AI. Logic verified for institutional accuracy.")
