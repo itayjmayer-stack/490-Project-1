@@ -58,6 +58,19 @@ To run this project locally, follow these steps:
 
 ---
 
+## 🏗 Development Methodology (DRIVER)
+
+This project was built using the **DRIVER** framework for advanced agentic coding:
+
+1. **D (Define)**: Requirement gathering for shareability and UI parity.
+2. **R (Represent)**: Technical planning and architectural mapping.
+3. **I (Implement)**: Modular Python development and CSS skinning.
+4. **V (Validate)**: Debugging dependency conflicts and state management.
+5. **E (Evolve)**: Polishing animations and premium dashboard components.
+6. **R (Reflect)**: Automated walkthroughs and technical documentation.
+
+---
+
 ## 📖 Methodology & Disclosure
 
 This tool uses institutional-grade financial logic but is intended for educational purposes. All calculations are derived from public data and user-provided assumptions.
