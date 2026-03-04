@@ -76,12 +76,15 @@ if 'company' not in st.session_state:
     st.session_state.company = None
 if 'ticker' not in st.session_state:
     st.session_state.ticker = ""
+if 'page' not in st.session_state:
+    st.session_state.page = "Home"
 if 'assumptions' not in st.session_state:
+# ... (rest of assumptions)
     st.session_state.assumptions = {
         'revenue_growth': 0.15,
         'fcf_margin': 0.25,
         'tax_rate': 0.21,
-        'wacc_mode': 'direct',
+        'wacc_mode': 'build',
         'wacc_direct': 0.10,
         'risk_free': 0.042,
         'mkt_premium': 0.055,
@@ -99,7 +102,13 @@ if 'assumptions' not in st.session_state:
 # --- SIDEBAR NAVIGATION ---
 with st.sidebar:
     st.title("📈 DCF Valuation")
-    page = st.radio("Navigation", ["Home", "Inputs", "Outputs", "Sensitivity", "Scenarios", "About"], label_visibility="collapsed")
+    nav_options = ["Home", "Inputs", "Outputs", "Sensitivity", "Scenarios", "About"]
+    try:
+        index = nav_options.index(st.session_state.page)
+    except:
+        index = 0
+    page = st.radio("Navigation", nav_options, index=index, label_visibility="collapsed")
+    st.session_state.page = page # Update session state when clicked
     
     st.divider()
     if st.session_state.company:
@@ -154,7 +163,8 @@ if page == "Home":
         with c3: st.metric("Beta", f"{comp['beta']:.2f}")
         
         if st.button("Go to Model →"):
-            st.info("Click 'Inputs' in the sidebar to proceed.")
+            st.session_state.page = "Inputs" # Add this to session state to control navigation
+            st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
 # --- PAGE: INPUTS ---
@@ -177,7 +187,7 @@ elif page == "Inputs":
             
             st.markdown('<div class="premium-card">', unsafe_allow_html=True)
             st.subheader("WACC Assumptions")
-            wacc_mode = st.radio("Method", ["Direct WACC", "Build WACC"], horizontal=True)
+            wacc_mode = st.radio("Method", ["Direct WACC", "Build WACC"], index=0 if st.session_state.assumptions['wacc_mode'] == 'direct' else 1, horizontal=True)
             st.session_state.assumptions['wacc_mode'] = 'direct' if wacc_mode == "Direct WACC" else 'build'
             
             if st.session_state.assumptions['wacc_mode'] == 'direct':
@@ -202,7 +212,8 @@ elif page == "Inputs":
             kpi_card("WACC Used", f"{val['wacc']*100:,.1f}%")
             
             if st.button("Run Full Model →"):
-                st.info("Analytics calculated. Click 'Outputs' in sidebar.")
+                st.session_state.page = "Outputs"
+                st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
 # --- PAGE: OUTPUTS ---
@@ -232,7 +243,7 @@ elif page == "Outputs":
         fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig, use_container_width=True)
         
-        st.dataframe(f_df.set_index('year')[['revenue', 'ebitda', 'fcf', 'pv_fcf']].style.format("${:,.1f}B"))
+        st.table(f_df.set_index('year')[['revenue', 'ebitda', 'fcf', 'pv_fcf']].applymap(lambda x: f"${x/1e9:,.1f}B"))
 
 # --- PAGE: SENSITIVITY ---
 elif page == "Sensitivity":
@@ -270,12 +281,74 @@ elif page == "Sensitivity":
             index=[f"{g*100:,.1f}%" for g in growth_range],
             columns=[f"{w*100:,.1f}%" for w in wacc_range]
         )
-        st.table(heat_df.style.background_gradient(cmap="RdYlGn", axis=None).format("${:,.2f}"))
+        try:
+            st.table(heat_df.style.background_gradient(cmap="RdYlGn", axis=None).format("${:,.2f}"))
+        except ImportError:
+            st.table(heat_df.applymap(lambda x: f"${x:,.2f}"))
+            st.warning("Note: Background gradients disabled until 'matplotlib' is installed on server.")
 
 # --- PAGE: SCENARIOS ---
 elif page == "Scenarios":
-    st.title("Scenario Analysis")
-    st.info("Feature in progress: Analyze Bull, Bear, and Base cases.")
+    if not st.session_state.company:
+        st.warning("Load a company first.")
+    else:
+        st.title("Scenario Analysis")
+        st.markdown("Bear / Base / Bull — adjust inputs and compare outcomes.")
+        
+        base = st.session_state.assumptions
+        comp = st.session_state.company
+        
+        scenarios = [
+            {"name": "Bear", "growth": base['revenue_growth'] - 0.05, "margin": base['fcf_margin'] - 0.05, "wacc_adj": 0.01},
+            {"name": "Base", "growth": base['revenue_growth'], "margin": base['fcf_margin'], "wacc_adj": 0},
+            {"name": "Bull", "growth": base['revenue_growth'] + 0.10, "margin": base['fcf_margin'] + 0.05, "wacc_adj": -0.01},
+        ]
+        
+        scenario_results = []
+        for sc in scenarios:
+            temp_assump = base.copy()
+            temp_assump['revenue_growth'] = sc['growth']
+            temp_assump['fcf_margin'] = sc['margin']
+            # Adjust WACC
+            actual_wacc = calc_wacc(temp_assump) + sc['wacc_adj']
+            temp_assump['wacc_mode'] = 'direct'
+            temp_assump['wacc_direct'] = actual_wacc
+            
+            res = run_full_model(comp, temp_assump)
+            v = res['valuation']
+            scenario_results.append({
+                "Scenario": sc['name'],
+                "Revenue Growth": f"{sc['growth']*100:.1f}%",
+                "FCF Margin": f"{sc['margin']*100:.1f}%",
+                "WACC": f"{actual_wacc*100:.1f}%",
+                "Intrinsic Value": v['per_share_value'],
+                "Upside": v['upside_pct']
+            })
+            
+        res_df = pd.DataFrame(scenario_results)
+        
+        st.markdown('<div class="premium-card">', unsafe_allow_html=True)
+        st.subheader("Scenario Comparison")
+        st.table(res_df.set_index("Scenario").style.format({
+            "Intrinsic Value": "${:,.2f}",
+            "Upside": "{:+.1%}"
+        }))
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Visual Chart
+        fig = go.Figure()
+        colors = {'Bear': '#ef4444', 'Base': '#6366f1', 'Bull': '#10b981'}
+        for i, row in res_df.iterrows():
+            fig.add_trace(go.Bar(
+                name=row['Scenario'], 
+                x=[row['Scenario']], 
+                y=[row['Intrinsic Value']],
+                marker_color=colors[row['Scenario']]
+            ))
+        
+        fig.add_hline(y=comp['price'], line_dash="dash", line_color="white", annotation_text="Current Price")
+        fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', title="Intrinsic Value by Scenario")
+        st.plotly_chart(fig, use_container_width=True)
 
 # --- PAGE: ABOUT ---
 elif page == "About":
